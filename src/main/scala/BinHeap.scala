@@ -1,21 +1,22 @@
 package misc
 import scala.reflect.ClassTag
 
-class BinHeap[T <% Ordered[T]](implicit m : ClassTag[T]) {
-  val array = new Array[T](2000)
+abstract class BinHeap[K <% Ordered[K], V]() {
+  //class BinHeap[T <% Ordered[T]](implicit m : ClassTag[T]) {
+  val array = new Array[Tuple2[K,V]](2000)
   var next  = 0
 
-  def insert(v : T) = {
+  def insert(k: K, v: V) = {
     // maybe expand array
-    array(next) = v
+    array(next) = Tuple2(k,v)
     next += 1
     def bubble_up(pos : Int) : Unit = {
       pos match {
         case 0 =>
         case _ =>
-          val d_pos = daddy(pos)
-          val d_val = array(d_pos)
-          if(d_val < v) {
+          val d_pos        = daddy(pos)
+          val(d_key,d_val) = array(d_pos)
+          if(compare(k, d_key)) {
             swap(pos, d_pos)
             bubble_up(d_pos)
           }
@@ -24,11 +25,11 @@ class BinHeap[T <% Ordered[T]](implicit m : ClassTag[T]) {
     bubble_up(next-1)
   }
 
-  def head() : T = {
+  def head() : Tuple2[K,V] = {
     val head  = array(0)
-    val nhead = array(next-1)
-    array(0)  = nhead
-    next -= 1
+    val(k, v) = array(next-1)
+    array(0)  = array(next-1)
+    next     -= 1
     def bubble_down(pos : Int) : Unit = {
       val l_pos = l_kid(pos)
       val r_pos = r_kid(pos)
@@ -43,26 +44,30 @@ class BinHeap[T <% Ordered[T]](implicit m : ClassTag[T]) {
         None
       }
       (l_val, r_val) match {
-        case (Some(v1), Some(v2)) if v1 >= v2 && v1 > nhead =>
+        case (Some(Tuple2(k1,v1)), Some(Tuple2(k2,v2)))
+          if (compare(k1, k2) || k1 == k2) && compare(k1, k) =>
           swap(l_pos, pos)
           bubble_down(l_pos)
-        case (Some(v1), Some(v2)) if v2 >= v1 && v2 > nhead =>
+        case (Some(Tuple2(k1,v1)), Some(Tuple2(k2,v2)))
+          if (compare(k2, k1) || k2 == k1) && compare(k2, k) =>
           swap(r_pos, pos)
           bubble_down(r_pos)
-        case (Some(v),  _)        if v > nhead =>
+        case (Some(Tuple2(k1,v1)),  _)
+          if compare(k1, k) =>
           swap(l_pos, pos)
           bubble_down(l_pos)
-        case (_,        Some(v))  if v > nhead =>
+        case (_, Some(Tuple2(k2,v2)))
+          if compare(k2, k) =>
           swap(r_pos, pos)
           bubble_down(r_pos)
-        case _                             =>
+        case _ =>
       }
     }
     bubble_down(0)
-    head
+    head //head._2
   }
 
-  def peek() : T = array(0)
+  def peek() : Tuple2[K,V] = array(0)
 
   def size() = next
 
@@ -74,4 +79,13 @@ class BinHeap[T <% Ordered[T]](implicit m : ClassTag[T]) {
   def daddy(i : Int) = (i - 1) / 2
   def l_kid(i : Int) = 2 * i + 1
   def r_kid(i : Int) = 2 * i + 2
+  def compare(k1: K, k2: K) : Boolean
+}
+
+class MaxBinHeap[K <% Ordered[K], V] extends BinHeap[K,V]() {
+  def compare(k1: K, k2: K) = k1 > k2
+}
+
+class MinBinHeap[K <% Ordered[K], V] extends BinHeap[K,V]() {
+  def compare(k1: K, k2: K) = k1 < k2
 }
