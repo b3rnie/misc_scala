@@ -4,16 +4,23 @@ import org.scalatest._
 
 class BinHeapTest extends FlatSpec {
   "A MaxBinHeap" should "return the entries in correct order" in {
-    val heap = new MaxBinHeap[Int,Int]()
-    val rand = new Random()
-    val list = (1 to 1000).map { _ => rand.nextInt() }
-    list.foreach(n => heap.insert(n,n))
-    assert(heap.size() === 1000)
-    list.sortWith(_ > _).foreach(n => {
-      println(n)
-      assert(heap.peek()._1 === n)
-      assert(heap.head()._2 === n)
+    val maxheap = new MaxBinHeap[Int,Int]()
+    val minheap = new MinBinHeap[Int,Int]()
+    val rand    = new Random()
+    val list    = (1 to 1000).map { _ => rand.nextInt() }
+    list.foreach(n => {
+      maxheap.insert(n,n)
+      minheap.insert(n,n)
     })
-    assert(heap.size() === 0)
+    assert(minheap.size() === 1000)
+    assert(maxheap.size() === 1000)
+    list.sortWith(_ > _).foreach(n => {
+      assert(maxheap.head()._1 === n)
+    })
+    list.sortWith(_ < _).foreach(n => {
+      assert(minheap.head()._1 === n)
+    })
+    assert(minheap.size() === 0)
+    assert(maxheap.size() === 0)
   }
 }

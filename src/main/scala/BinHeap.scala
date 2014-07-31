@@ -3,11 +3,11 @@ import scala.reflect.ClassTag
 
 abstract class BinHeap[K <% Ordered[K], V]() {
   //class BinHeap[T <% Ordered[T]](implicit m : ClassTag[T]) {
-  val array = new Array[Tuple2[K,V]](2000)
+  var array = new Array[Tuple2[K,V]](101)
   var next  = 0
 
   def insert(k: K, v: V) = {
-    // maybe expand array
+    maybe_expand_array()
     array(next) = Tuple2(k,v)
     next += 1
     def bubble_up(pos : Int) : Unit = {
@@ -64,13 +64,28 @@ abstract class BinHeap[K <% Ordered[K], V]() {
       }
     }
     bubble_down(0)
-    head //head._2
+    maybe_shrink_array()
+    head
   }
 
   def peek() : Tuple2[K,V] = array(0)
 
   def size() = next
 
+  def maybe_expand_array() = {
+    if(next == array.size) {
+      val newarray = new Array[Tuple2[K,V]](array.size * 3)
+      array.copyToArray(newarray)
+      array = newarray
+    }
+  }
+  def maybe_shrink_array() = {
+    if(array.size > 101 && next < (array.size/6)) {
+      val newarray = new Array[Tuple2[K,V]](array.size/3)
+      array.copyToArray(newarray, 0, next)
+      array = newarray
+    }
+  }
   def swap(p1 : Int, p2 : Int) = {
     val tmp = array(p1)
     array(p1) = array(p2)
