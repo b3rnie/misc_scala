@@ -116,23 +116,18 @@ abstract class BinHeap[K <% Ordered[K],V](it: Iterator[Tuple2[K,V]]) {
   def l_kid(i: Int) = 2 * i + 1
   def r_kid(i: Int) = 2 * i + 2
   def compare(k1: K, k2: K) : Boolean
-  override def toString() = {
-    array.toString
-  }
 }
 
-class MaxBinHeap[K <% Ordered[K], V](
-    it: Iterator[Tuple2[K,V]]
-  ) extends BinHeap[K,V](it) {
+class MaxBinHeap[K <% Ordered[K], V](it: Iterator[Tuple2[K,V]])
+  extends BinHeap[K,V](it) {
 
   def this() = this(Iterator[Tuple2[K,V]]())
 
   def compare(k1: K, k2: K) = k1 > k2
 }
 
-class MinBinHeap[K <% Ordered[K], V](
-    it: Iterator[Tuple2[K,V]]
-  ) extends BinHeap[K,V](it) {
+class MinBinHeap[K <% Ordered[K], V](it: Iterator[Tuple2[K,V]])
+  extends BinHeap[K,V](it) {
 
   def this() = this(Iterator[Tuple2[K,V]]())
 
