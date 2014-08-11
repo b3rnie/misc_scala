@@ -1,7 +1,10 @@
 package misc
 import java.io.{File, RandomAccessFile}
+import java.nio.ByteBuffer
 import java.util.zip.CRC32
 import scala.util.matching.Regex
+
+
 
 case class BitcaskEntry(
   file_id:    Int,
@@ -19,35 +22,46 @@ case class FStats(
   newest_tstamp: Int
 )
 
-class Bitcask(dir:     String,
-              timeout: Int = 0) {
-  val idx = scala.collection.mutable.Map[Array[Byte], BitcaskEntry]() //FIXME: concurrent access!
-  val log = new BitcaskLog(new File(dir))
+class Bitcask(dir: File, timeout: Int = 0) {
+  val idx = scala.collection.mutable.Map[ByteBuffer,
+                                         BitcaskEntry]() //FIXME: concurrent access!
+  val log = new BitcaskLog(dir)
   log.iterate((e1,e2) => {
     // update idx
     // update stats
   })
 
   def get(k: Array[Byte]) : Option[Array[Byte]] = {
-    idx.get(k) match {
-      case Some(e) => log.read(e)
-      case None    => None
+    var res = idx.synchronized { idx.get(ByteBuffer.wrap(k)) }
+    res match {
+      case Some(e) =>
+        log.read(e) match {
+          case Some(buff) =>
+            var(key, value) = unpack(buff)
+            Option(value)
+
+          case None =>
+            // log, should not happen
+            None
+        }
+      case None =>
+        None
     }
   }
 
   def put(k: Array[Byte], v: Array[Byte]) = {
-    //val e = create_entry(k, v)
+    val b = pack(k,v)
     log.synchronized {
-      //val be = log.append(e)
-      // update idx
-      // update stats
+      val be = log.append(b)
+      idx.synchronized { update_idx(k, be) }
     }
+    println("size = " + idx.size)
   }
 
   def delete(k: Array[Byte]) = {
     log.synchronized {
       //log.append(k, "tombstone")
-      // update idx
+      // update_idx
       // update stats
     }
   }
@@ -55,47 +69,20 @@ class Bitcask(dir:     String,
   def list_keys() : List[Array[Byte]] = {
     ???
   }
-  /*
-  def update_idx(k, be: BitcaskEntry) = {
-    idx.get(k) match {
+
+  def update_idx(k: Array[Byte], be: BitcaskEntry) = {
+    println("k = " + new String(k))
+    idx.put(ByteBuffer.wrap(k), be) match {
       case Some(_) =>
-        // update_stats(oldfile)
-        idx.put(k, be)
+        println("dec stats")
+        // inc_stats()
+        // dec_stats()
       case None =>
-        idx.put(k, be)
+        // inc_stats()
     }
   }
-*/
-  /*
-  def create_entry(k: Array[Byte], v: Array[Byte]) = {
-    //crc32 32 bytes
-    //tstamp 32bytes // number of seconds since 1970
-    //keysize 16bytes
-    //valuesize 32bytes
-    //key
-    //value
-    val tstamp = timestamp
-    val crc32  = new CRC32()
-    crc32.update(timestamp.getBytes)
-    crc32.update(k.size.getBytes)
-    crc32.update(v.size.getBytes)
-    crc32.update(k)
-    crc32.update(v)
-    val buffer = ByteBuffer.allocate(4 + // crc32
-                                     4 + // tstamp
-                                     2 + // keysize
-                                     4 + // valuesize
-                                     k.size +
-                                     v.size)
-    buffer.putInt((0xFFFFFFFF & crc32.getValue).toInt)
-    buffer.putInt(tstamp)
-    buffer.putChar((k.size & 0xFFFF).toChar)
-    buffer.putInt(v.size)
-    buffer.put(k)
-    buffer.put(v)
-  }
-  */
-  def timestamp = (System.currentTimeMillis() / 1000).toInt
+
+  def timestamp = (System.currentTimeMillis() / 1000).toLong
 
   def merge = {
     // figure out which files need merging (stats/etc)
@@ -105,6 +92,53 @@ class Bitcask(dir:     String,
       log.switch_log // new 'empty'
       log.switch_log // new 'active'
     }
+  }
+
+  def pack(k: Array[Byte], v: Array[Byte]) : ByteBuffer = {
+    // FIXME: max key/val size
+    val size   = 4 + // crc32
+                 4 + // timestamp // number of seconds since 1970
+                 2 + // keysize
+                 4 + // valuesize
+                 k.size +
+                 v.size
+    val crc32  = new CRC32()
+    val buffer = ByteBuffer.allocate(size)
+    buffer.position(4)
+    val tstamp = timestamp
+    buffer.putChar(((tstamp >> 16) & 0xFFFF).toChar)
+    buffer.putChar((tstamp         & 0xFFFF).toChar)
+    buffer.putChar(k.size.toChar)
+    buffer.putInt(v.size)
+    buffer.put(k)
+    buffer.put(v)
+    buffer.position(0)
+    crc32.update(buffer.array(), 4, size-4)
+    val crc32val = crc32.getValue()
+    buffer.putChar(((crc32val >> 16) & 0xFFFF).toChar)
+    buffer.putChar((crc32val         & 0xFFFF).toChar)
+    buffer.rewind()
+    buffer
+  }
+
+  def unpack(b: ByteBuffer) : Tuple2[Array[Byte], Array[Byte]] = {
+    // check key
+    // check crc32
+    // check boundaries
+    var crc32val = b.getChar().toLong
+    crc32val = (crc32val << 16) | b.getChar().toLong
+    var tstamp = b.getChar().toLong
+    tstamp = (tstamp << 16) | b.getChar().toLong
+    var ksize = b.getChar().toLong
+    var vsize = b.getChar().toLong
+    vsize = (vsize << 16) | b.getChar().toLong
+    println(ksize)
+    println(vsize)
+    var kk = new Array[Byte](ksize.toInt)
+    var vv = new Array[Byte](vsize.toInt)
+    b.get(kk)
+    b.get(vv)
+    Tuple2(kk, vv)
   }
 }
 
@@ -116,21 +150,27 @@ class BitcaskLog(dir: File) {
   // API ---------------------------------------------------------------
   // TODO: index
   def iterate(f: (Array[Byte], BitcaskEntry) => Any) = {
-    ???
+    
   }
   def iterate(id: Int, f: (Array[Byte], BitcaskEntry) => Any) = {
     // read files in order, if hintfile exist use that
-    ???
   }
 
-  def read(e: BitcaskEntry) = {
+  def read(e: BitcaskEntry) : Option[ByteBuffer] = {
     // FIXME: pool
-    
-    val raf = new RandomAccessFile(filename(e.file_id), "r")
+    val raf = new RandomAccessFile(
+      new File(dir, filename(e.file_id)), "r")
     try {
-      raf.seek(e.offset)
-      ???
-      //raf.read(e.total_size)
+      var buff = ByteBuffer.allocate(e.total_size.toInt)
+      var chan = raf.getChannel()
+      chan.position(e.offset)
+      if(raf.getChannel().read(buff)!=e.total_size) {
+        // warn
+        None
+      } else{
+        buff.flip()
+        Option(buff)
+      }
     } finally {
       raf.close()
     }
@@ -142,14 +182,21 @@ class BitcaskLog(dir: File) {
     active = open_active()
   }
 
-  def append(e: Array[Byte]) : BitcaskEntry = {
+  def append(e: ByteBuffer) : BitcaskEntry = {
+    var pos = active.getFilePointer()
+    active.getChannel.write(e)
+    BitcaskEntry(file_id    = next_id -1,
+                 offset     = pos,
+                 total_size = active.getFilePointer()-pos)
+  }
+  //def append(e: Array[Byte]) : BitcaskEntry = {
     // append to latest file
     //if(size >= max_size) {
     //  switch_log()
     //}
-    ???
-    maybe_switch_log()
-  }
+  //  ???
+  //  maybe_switch_log()
+  //}
 
   // Internal ----------------------------------------------------------
   private def clean_tmp_files() = {
@@ -175,13 +222,12 @@ class BitcaskLog(dir: File) {
   }
 
   private def open_active() = {
-    var fn = filename(next_id+1)
+    var fn = filename(next_id)
     next_id+=1
-    new RandomAccessFile(fn, "rw")
+    new RandomAccessFile(new File(dir, fn), "rw")
   }
 
   private def filename(id: Int) = {
     "bitcask_%08d.data".format(id)
   }
 }
-
