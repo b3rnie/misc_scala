@@ -2,7 +2,9 @@
  * Björn Jensen-Urstad / 2014
  */
 package misc
-import java.io.{File, RandomAccessFile}
+import java.io.{File,
+                RandomAccessFile,
+                FileInputStream, BufferedInputStream}
 import java.nio.ByteBuffer
 import java.util.zip.CRC32
 import scala.util.matching.Regex
@@ -23,12 +25,12 @@ case class FStats(
   newest_tstamp: Int
 )
 
-class Bitcask(dir: File, timeout: Int = 0) {
+class Bitcask(dir: File, timeout: Int = 0) extends Logging {
+  // FIXME: move to actors
   val idx   = scala.collection.mutable.Map[ByteBuffer, BitcaskEntry]()
   val log   = new BitcaskLog(dir)
   val stats = new BitcaskStats()
-  log.iterate((k,be) => {
-    
+  log.iterate((file_id, iterator) => {
     // update idx
     // update stats
   })
@@ -138,18 +140,25 @@ class Bitcask(dir: File, timeout: Int = 0) {
   }
 }
 
-class BitcaskLog(dir: File) {
+class BitcaskLog(dir: File) extends Logging {
   var archive = archive_files()
   var next_id = if(archive.size!=0) archive.last+1 else 1
   var active  = open_active()
 
   // API ---------------------------------------------------------------
   // TODO: index
-  def iterate(f: (Array[Byte], BitcaskEntry) => Any) = {
-    
+  def iterate(f: (Long, BufferedInputStream) => Any) : Unit = {
+    archive_files.foreach(id => iterate(id, f))
+    iterate(next_id-1, f)
   }
-  def iterate(id: Int, f: (Array[Byte], BitcaskEntry) => Any) = {
+
+  def iterate(id: Long, f: (Long, BufferedInputStream) => Any) : Unit = {
     // read files in order, if hintfile exist use that
+    val is = new BufferedInputStream(
+      new FileInputStream(new File(dir, filename(id))))
+    try { f(id, is) } finally { is.close }
+    //var b = new Array[Byte](14)
+    //in.read(b)
   }
 
   def read(e: BitcaskEntry) : Option[ByteBuffer] = {
@@ -202,7 +211,7 @@ class BitcaskLog(dir: File) {
     }).sortWith(_<_)
   }
 
-  def build_index(id: Int) = {
+  def build_index(id: Long) = {
     ???
   }
 
@@ -217,7 +226,7 @@ class BitcaskLog(dir: File) {
   }
 }
 
-class BitcaskStats {
+class BitcaskStats extends Logging {
   def inc(be: BitcaskEntry) = {
 
   }

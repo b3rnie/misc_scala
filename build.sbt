@@ -10,3 +10,4 @@ libraryDependencies += "postgresql" % "postgresql" % "9.2-1002.jdbc4"
 
 resolvers += "Typesafe Repository" at "http://repo.typesafe.com/typesafe/releases/"
 
+libraryDependencies += "ch.qos.logback" % "logback-classic" % "1.1.2"
