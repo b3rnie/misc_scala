@@ -19,9 +19,12 @@ class BitcaskTest extends FlatSpec {
     var dir = init_dir
     var bc1 = new Bitcask(dir)
     bc1.put("foo".getBytes(), "123".getBytes())
+    bc1.put("bar".getBytes(), "456".getBytes())
+    bc1.delete("bar".getBytes())
     bc1.stop
     var bc2 = new Bitcask(dir)
     assert(bc2.get("foo".getBytes()).get === "123".getBytes())
+    assert(bc2.get("bar".getBytes())     === None)
   }
 
   def init_dir = {
