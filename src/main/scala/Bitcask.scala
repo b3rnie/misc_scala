@@ -9,31 +9,17 @@ import java.nio.ByteBuffer
 import java.util.zip.CRC32
 import scala.util.matching.Regex
 
-case class BitcaskEntry(
-  file_id:    Long,
-  offset:     Int,
-  total_size: Int
-)
-
-case class FStats(
-  file_id:       Long,
-  live_keys:     Long,
-  live_bytes:    Long,
-  total_keys:    Long,
-  total_bytes:   Long,
-  oldest_tstamp: Int,
-  newest_tstamp: Int
+case class BitcaskLogEntry (
+    id:         Long,
+    offset:     Int,
+    total_size: Int
 )
 
 class Bitcask(dir: File, timeout: Int = 0) extends Logging {
   // FIXME: move to actors
-  val idx   = scala.collection.mutable.Map[ByteBuffer, BitcaskEntry]()
   val log   = new BitcaskLog(dir)
+  var idx   = new BitcaskIdx(log)
   val stats = new BitcaskStats()
-  log.iterate((file_id, iterator) => {
-    // update idx
-    // update stats
-  })
 
   def get(k: Array[Byte]) : Option[Array[Byte]] = {
     var be = idx.synchronized { idx.get(ByteBuffer.wrap(k)) }
@@ -41,10 +27,10 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
       case Some(e) =>
         log.read(e) match {
           case Some(buff) =>
-            var(key, value) = unpack(buff)
+            var(key, value) = BitcaskData.unpack(buff)
             Option(value)
           case None =>
-            // log, should not happen
+            warn("found key in index but not in log")
             None
         }
       case None =>
@@ -53,7 +39,7 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
   }
 
   def put(k: Array[Byte], v: Array[Byte]) = {
-    val b = pack(k,v)
+    val b = BitcaskData.pack(k,v)
     log.synchronized {
       val be = log.append(b)
       idx.synchronized {
@@ -65,7 +51,7 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
 
   def delete(k: Array[Byte]) = {
     /* TODO: dont add tombstone unless key exist */
-    val b = pack(k, "__tombstone__".getBytes)
+    val b = BitcaskData.pack(k, "__tombstone__".getBytes)
     log.synchronized {
       val be = log.append(b)
       idx.synchronized {
@@ -82,7 +68,6 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
 
   }
 
-  def timestamp = (System.currentTimeMillis() / 1000).toLong
 
   def merge = {
     // figure out which files need merging (stats/etc)
@@ -94,14 +79,19 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
     }
   }
 
+
+}
+
+object BitcaskData {
+  // crc32     - 4 bytes
+  // timestamp - 4 bytes
+  // keysize   - 2 bytes
+  // valuesize - 4 bytes
+  var HEADER_SIZE = 14
+
   def pack(k: Array[Byte], v: Array[Byte]) : ByteBuffer = {
     // FIXME: max key/val size
-    val size   = 4 + // crc32
-                 4 + // timestamp // number of seconds since 1970
-                 2 + // keysize
-                 4 + // valuesize
-                 k.size +
-                 v.size
+    val size = HEADER_SIZE + k.size + v.size
     val crc32  = new CRC32()
     val buffer = ByteBuffer.allocate(size)
     buffer.position(4)
@@ -125,19 +115,31 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
     // check key
     // check crc32
     // check boundaries
-    var crc32val = b.getChar().toLong
-    crc32val = (crc32val << 16) | b.getChar().toLong
-    var tstamp = b.getChar().toLong
-    tstamp = (tstamp << 16) | b.getChar().toLong
-    var ksize = b.getChar().toLong
-    var vsize = b.getChar().toLong
-    vsize = (vsize << 16) | b.getChar().toLong
-    var kk = new Array[Byte](ksize.toInt)
-    var vv = new Array[Byte](vsize.toInt)
-    b.get(kk)
-    b.get(vv)
-    Tuple2(kk, vv)
+    var(crc32val, tstamp, ksize, vsize) = unpack_header(b)
+    var(k,v)                            = unpack_body(b,ksize,vsize)
+    (k,v)
   }
+
+  def unpack_header(b: ByteBuffer) = {
+    var crc32val = b.getChar().toLong
+    crc32val     = (crc32val << 16) | b.getChar().toLong
+    var tstamp   = b.getChar().toLong
+    tstamp       = (tstamp << 16) | b.getChar().toLong
+    var ksize    = b.getChar().toInt
+    var vsize    = b.getChar().toInt
+    vsize        = (vsize << 16) | b.getChar().toInt
+    (crc32val, tstamp, ksize, vsize)
+  }
+
+  def unpack_body(b: ByteBuffer, ksize: Int, vsize: Int) = {
+    var k = new Array[Byte](ksize)
+    var v = new Array[Byte](vsize)
+    b.get(k)
+    b.get(v)
+    (k,v)
+  }
+
+  def timestamp = (System.currentTimeMillis() / 1000).toLong
 }
 
 class BitcaskLog(dir: File) extends Logging {
@@ -146,7 +148,6 @@ class BitcaskLog(dir: File) extends Logging {
   var active  = open_active()
 
   // API ---------------------------------------------------------------
-  // TODO: index
   def iterate(f: (Long, BufferedInputStream) => Any) : Unit = {
     archive_files.foreach(id => iterate(id, f))
     iterate(next_id-1, f)
@@ -157,20 +158,18 @@ class BitcaskLog(dir: File) extends Logging {
     val is = new BufferedInputStream(
       new FileInputStream(new File(dir, filename(id))))
     try { f(id, is) } finally { is.close }
-    //var b = new Array[Byte](14)
-    //in.read(b)
   }
 
-  def read(e: BitcaskEntry) : Option[ByteBuffer] = {
+  def read(e: BitcaskLogEntry) : Option[ByteBuffer] = {
     // FIXME: pool
     val raf = new RandomAccessFile(
-      new File(dir, filename(e.file_id)), "r")
+      new File(dir, filename(e.id)), "r")
     try {
       var buff = ByteBuffer.allocate(e.total_size.toInt)
       var chan = raf.getChannel()
       chan.position(e.offset)
       if(raf.getChannel().read(buff)!=e.total_size) {
-        // warn
+        warn("read returned prematurely")
         None
       } else{
         buff.flip()
@@ -183,24 +182,23 @@ class BitcaskLog(dir: File) extends Logging {
 
   def switch_log() = {
     active.close()
-    // build index
     active = open_active()
   }
 
-  def append(e: ByteBuffer) : BitcaskEntry = {
+  def append(e: ByteBuffer) : BitcaskLogEntry = {
     // if(size >= max_size) switch_log
     var pos = active.getFilePointer().toInt
     active.getChannel.write(e)
-    BitcaskEntry(file_id    = next_id -1,
-                 offset     = pos,
-                 total_size = (active.getFilePointer()-pos).toInt)
+    BitcaskLogEntry(id         = next_id -1,
+                    offset     = pos,
+                    total_size = (active.getFilePointer()-pos).toInt)
+  }
+
+  def delete(id: Long) = {
+    new File(dir, filename(id)).delete()
   }
 
   // Internal ----------------------------------------------------------
-  private def clean_tmp_files() = {
-    ???
-  }
-
   private def archive_files() = {
     val re = """^bitcask_(\d+){19}\.data$""".r
     dir.listFiles().flatMap(e => {
@@ -209,10 +207,6 @@ class BitcaskLog(dir: File) extends Logging {
         case None    => Nil
       }
     }).sortWith(_<_)
-  }
-
-  def build_index(id: Long) = {
-    ???
   }
 
   private def open_active() = {
@@ -226,12 +220,84 @@ class BitcaskLog(dir: File) extends Logging {
   }
 }
 
+class BitcaskIdx(log: BitcaskLog) extends Logging {
+  val idx = scala.collection.mutable.Map[ByteBuffer,
+                                         BitcaskLogEntry]()
+  // TODO: store this information on disk so we dont have to
+  // iterate through all logfiles.
+  log.iterate((id, is) => {
+    var offset = 0
+    def f: Unit = {
+      try_read(BitcaskData.HEADER_SIZE, is) match {
+        case ReadEof() =>
+        case ReadOk(b) =>
+          val(crc32, tstamp, ksize, vsize) = BitcaskData.unpack_header(ByteBuffer.wrap(b))
+          try_read(ksize+vsize, is) match {
+            case ReadOk(kv) =>
+              val(k,v) = BitcaskData.unpack_body(ByteBuffer.wrap(kv), ksize,vsize)
+              val be = BitcaskLogEntry(id         = id,
+                                       total_size = ksize+vsize+BitcaskData.HEADER_SIZE,
+                                       offset     = offset)
+              //stats.inc(be)
+              debug("k = " + ksize)
+              debug("v = " + vsize)
+              idx.put(ByteBuffer.wrap(k), be)//.foreach(old => stats.dec(old))
+              offset+=BitcaskData.HEADER_SIZE+ksize+vsize
+            case ReadEof() =>
+            case ReadShort() =>
+          }
+        case ReadShort() =>
+          warn("short read while iterating over log")
+      }
+    }
+    f
+  })
+
+  sealed abstract class Read
+  case class ReadEof()              extends Read
+  case class ReadOk(b: Array[Byte]) extends Read
+  case class ReadShort()            extends Read
+
+  def try_read(n: Int, is: BufferedInputStream) : Read = {
+    debug("n = " + n)
+    var buf  = new Array[Byte](n)
+    var left = n
+    var off  = 0
+    var r = 0
+    do {
+      // omg: flashback from the nineties and programming c.
+      r = is.read(buf, off, left)
+      if(r>0) {
+        left-=r
+        off+=r
+      }
+    } while(r>0 && left>0)
+    if(r<0 && off==0) return ReadEof()
+    else if(r<=0)     return ReadShort()
+    else              return ReadOk(buf)
+  }
+
+  def get(k: ByteBuffer) = idx.get(k)
+  def put(k: ByteBuffer, v: BitcaskLogEntry) = idx.put(k,v)
+  def remove(k: ByteBuffer) = idx.remove(k)
+}
+
 class BitcaskStats extends Logging {
-  def inc(be: BitcaskEntry) = {
+
+  case class FStats(
+    file_id:       Long,
+    live_keys:     Long,
+    live_bytes:    Long,
+    total_keys:    Long,
+    total_bytes:   Long,
+    oldest_tstamp: Int,
+    newest_tstamp: Int
+  )
+
+  def inc(be: BitcaskLogEntry) = {
 
   }
-  def dec(be: BitcaskEntry) = {
+  def dec(be: BitcaskLogEntry) = {
 
   }
 }
-
