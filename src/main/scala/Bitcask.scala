@@ -15,14 +15,14 @@ case class BitcaskLogEntry (
   total_size: Int
 )
 
-case class BitcaskLogHdr (
+case class BitcaskHeader (
   crc32:   Long,
   tstamp:  Long,
   keysize: Int,
   valsize: Int
 )
 
-case class BitcaskLogBody (
+case class BitcaskBody (
   key:   Array[Byte],
   value: Array[Byte]
 )
@@ -113,7 +113,7 @@ object BitcaskData {
     buffer
   }
 
-  def unpack(b: ByteBuffer) : Tuple2[BitcaskLogHdr,BitcaskLogBody] = {
+  def unpack(b: ByteBuffer) : Tuple2[BitcaskHeader,BitcaskBody] = {
     // check key
     // check boundaries
     var hdr = unpack_header(b)
@@ -129,7 +129,7 @@ object BitcaskData {
     (hdr,body)
   }
 
-  def unpack_header(b: ByteBuffer) = {
+  def unpack_header(b: ByteBuffer) : BitcaskHeader = {
     var crc32val = b.getChar().toLong
     crc32val     = (crc32val << 16) | b.getChar().toLong
     var tstamp   = b.getChar().toLong
@@ -137,18 +137,18 @@ object BitcaskData {
     var ksize    = b.getChar().toInt
     var vsize    = b.getChar().toInt
     vsize        = (vsize << 16) | b.getChar().toInt
-    BitcaskLogHdr(crc32=crc32val,
+    BitcaskHeader(crc32=crc32val,
                   tstamp=tstamp,
                   keysize=ksize,
                   valsize=vsize)
   }
 
-  def unpack_body(b: ByteBuffer, hdr: BitcaskLogHdr) : BitcaskLogBody = {
+  def unpack_body(b: ByteBuffer, hdr: BitcaskHeader) : BitcaskBody = {
     var k = new Array[Byte](hdr.keysize)
     var v = new Array[Byte](hdr.valsize)
     b.get(k)
     b.get(v)
-    BitcaskLogBody(key=k, value=v)
+    BitcaskBody(key=k, value=v)
   }
 
   def is_tombstone(value: Array[Byte]) = {
