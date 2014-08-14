@@ -10,9 +10,21 @@ import java.util.zip.CRC32
 import scala.util.matching.Regex
 
 case class BitcaskLogEntry (
-    id:         Long,
-    offset:     Int,
-    total_size: Int
+  id:         Long,
+  offset:     Int,
+  total_size: Int
+)
+
+case class BitcaskLogHdr (
+  crc32:   Long,
+  tstamp:  Long,
+  keysize: Int,
+  valsize: Int
+)
+
+case class BitcaskLogBody (
+  key:   Array[Byte],
+  value: Array[Byte]
 )
 
 class BitcaskException(s: String) extends RuntimeException(s) {}
@@ -27,8 +39,11 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
     idx.synchronized { idx.get(k) } match {
       case Some(e) =>
         var buff = log.read(e)
-        var(key, value) = BitcaskData.unpack(buff)
-        Option(value)
+        var(hdr, body) = BitcaskData.unpack(buff)
+        if(BitcaskData.is_tombstone(body.value))
+          None
+        else
+          Option(body.value)
       case None =>
         None
     }
@@ -44,11 +59,7 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
 
   def delete(k: Array[Byte]) = {
     idx.synchronized { idx.get(k) }.foreach(_ => {
-      val b = BitcaskData.pack(k, "__tombstone__".getBytes)
-      log.synchronized {
-        val be = log.append(b)
-        idx.synchronized { idx.remove(k,be) }
-      }
+      put(k, BitcaskData.TOMBSTONE.getBytes)
     })
   }
 
@@ -59,7 +70,6 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
   def stop = {
 
   }
-
 
   def merge = {
     // figure out which files need merging (stats/etc)
@@ -73,6 +83,8 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
 }
 
 object BitcaskData {
+  final val TOMBSTONE = "__tombstone__"
+
   // crc32     - 4 bytes
   // timestamp - 4 bytes
   // keysize   - 2 bytes
@@ -101,20 +113,20 @@ object BitcaskData {
     buffer
   }
 
-  def unpack(b: ByteBuffer) : Tuple2[Array[Byte], Array[Byte]] = {
+  def unpack(b: ByteBuffer) : Tuple2[BitcaskLogHdr,BitcaskLogBody] = {
     // check key
     // check boundaries
-    var(crc32val, tstamp, ksize, vsize) = unpack_header(b)
+    var hdr = unpack_header(b)
     var crc32 = new CRC32()
     var a = b.array()
     crc32.update(a, 4, a.size-4)
     println("size = " + a.size)
     println("current = " + (crc32.getValue() & 0xFFFFFFFF))
-    println("expected = " + crc32val)
-    if(crc32.getValue() != crc32val)
+    println("expected = " + hdr.crc32)
+    if(crc32.getValue() != hdr.crc32)
       throw new CRC32Exception
-    var(k,v) = unpack_body(b,ksize,vsize)
-    (k,v)
+    var body = unpack_body(b, hdr)
+    (hdr,body)
   }
 
   def unpack_header(b: ByteBuffer) = {
@@ -125,15 +137,22 @@ object BitcaskData {
     var ksize    = b.getChar().toInt
     var vsize    = b.getChar().toInt
     vsize        = (vsize << 16) | b.getChar().toInt
-    (crc32val, tstamp, ksize, vsize)
+    BitcaskLogHdr(crc32=crc32val,
+                  tstamp=tstamp,
+                  keysize=ksize,
+                  valsize=vsize)
   }
 
-  def unpack_body(b: ByteBuffer, ksize: Int, vsize: Int) = {
-    var k = new Array[Byte](ksize)
-    var v = new Array[Byte](vsize)
+  def unpack_body(b: ByteBuffer, hdr: BitcaskLogHdr) : BitcaskLogBody = {
+    var k = new Array[Byte](hdr.keysize)
+    var v = new Array[Byte](hdr.valsize)
     b.get(k)
     b.get(v)
-    (k,v)
+    BitcaskLogBody(key=k, value=v)
+  }
+
+  def is_tombstone(value: Array[Byte]) = {
+    ByteBuffer.wrap(value) == ByteBuffer.wrap(TOMBSTONE.getBytes)
   }
 
   def timestamp = (System.currentTimeMillis() / 1000).toLong
@@ -143,6 +162,7 @@ object BitcaskData {
   }
 }
 
+// Simple append only log
 class BitcaskLog(dir: File) extends Logging {
   var archive = archive_files()
   var next_id = if(archive.size!=0) archive.last+1 else 1
@@ -227,20 +247,17 @@ class BitcaskIdx(dir: File, log: BitcaskLog) extends Logging {
       try_read(BitcaskData.HEADER_SIZE, is) match {
         case ReadEof() =>
         case ReadOk(b) =>
-          val(crc32, tstamp, ksize, vsize) = BitcaskData.unpack_header(ByteBuffer.wrap(b))
-          try_read(ksize+vsize, is) match {
+          val hdr = BitcaskData.unpack_header(ByteBuffer.wrap(b))
+          try_read(hdr.keysize+hdr.valsize, is) match {
             case ReadOk(kv) =>
-              val(k,v) = BitcaskData.unpack_body(ByteBuffer.wrap(kv), ksize,vsize)
+              val body = BitcaskData.unpack_body(ByteBuffer.wrap(kv), hdr)
               val be = BitcaskLogEntry(id         = id,
-                                       total_size = ksize+vsize+BitcaskData.HEADER_SIZE,
+                                       total_size = hdr.keysize+hdr.valsize+BitcaskData.HEADER_SIZE,
                                        offset     = offset)
-              debug("k = " + new String(k))
-              debug("v = " + new String(v))
-              if(ByteBuffer.wrap(v) == ByteBuffer.wrap("__tombstone__".getBytes))
-                remove(k, be)
-              else
-                put(k, be)
-              offset+=BitcaskData.HEADER_SIZE+ksize+vsize
+              debug("k = " + new String(body.key))
+              debug("v = " + new String(body.value))
+              put(body.key, be)
+              offset+=BitcaskData.HEADER_SIZE+hdr.keysize+hdr.valsize
             case ReadEof() =>
               warn("unexpected eof while iterating %d".format(id))
             case ReadShort() =>
@@ -282,14 +299,14 @@ class BitcaskIdx(dir: File, log: BitcaskLog) extends Logging {
   }
 
   def put(k: Array[Byte], v: BitcaskLogEntry) = {
-    inc(v)
-    idx.put(ByteBuffer.wrap(k),v).foreach(old => dec(old))
-  }
-
-  def remove(k: Array[Byte], be: BitcaskLogEntry) = {
-    idx.remove(ByteBuffer.wrap(k)) match {
+    idx.put(ByteBuffer.wrap(k), v) match {
       case Some(old) =>
-      case None      =>
+        // if(tombstone(v) && tombstone(old)) dec(v) else
+        inc(v)
+        dec(old)
+      case None =>
+        // if(tombstone) dec(v) else
+        inc(v)
     }
   }
 
