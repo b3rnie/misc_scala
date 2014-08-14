@@ -9,6 +9,12 @@ import java.nio.ByteBuffer
 import java.util.zip.CRC32
 import scala.util.matching.Regex
 
+case class BitcaskEntry (
+  pos:       BitcaskLogEntry,
+  tombstone: Boolean
+  //tstamp:    Long
+)
+
 case class BitcaskLogEntry (
   id:         Long,
   offset:     Int,
@@ -37,30 +43,37 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
 
   def get(k: Array[Byte]) : Option[Array[Byte]] = {
     idx.synchronized { idx.get(k) } match {
-      case Some(e) =>
-        var buff = log.read(e)
-        var(hdr, body) = BitcaskData.unpack(buff)
-        if(BitcaskData.is_tombstone(body.value))
-          None
-        else
-          Option(body.value)
+      case Some(BitcaskEntry(_,tombstone)) if tombstone => None
+      // TODO: dont return if expired
+      case Some(BitcaskEntry(pos,_)) =>
+        var buff = log.read(pos)
+        var(hdr, body) = Bitcask.unpack(buff)
+        Option(body.value)
       case None =>
         None
     }
   }
 
   def put(k: Array[Byte], v: Array[Byte]) = {
-    val b = BitcaskData.pack(k,v)
+    val b = Bitcask.pack(k,v)
     log.synchronized {
       val be = log.append(b)
-      idx.synchronized { idx.put(k, be) }
+      idx.synchronized { idx.put(k, BitcaskEntry(pos=be, tombstone=false)) }
     }
   }
 
   def delete(k: Array[Byte]) = {
-    idx.synchronized { idx.get(k) }.foreach(_ => {
-      put(k, BitcaskData.TOMBSTONE.getBytes)
-    })
+    idx.synchronized { idx.get(k) } match {
+      case Some(BitcaskEntry(_,tombstone)) if tombstone => None
+      // TODO: dont append if expired
+      case Some(BitcaskEntry(_,_)) =>
+        val b = Bitcask.pack(k,Bitcask.TOMBSTONE.getBytes)
+        log.synchronized {
+          val be = log.append(b)
+          idx.synchronized { idx.put(k, BitcaskEntry(pos=be, tombstone=true)) }
+        }
+      case None => None
+    }
   }
 
   def list_keys() : List[Array[Byte]] = {
@@ -82,7 +95,7 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
   }
 }
 
-object BitcaskData {
+object Bitcask {
   final val TOMBSTONE = "__tombstone__"
 
   // crc32     - 4 bytes
@@ -237,27 +250,27 @@ class BitcaskLog(dir: File) extends Logging {
 }
 
 class BitcaskIdx(dir: File, log: BitcaskLog) extends Logging {
-  val idx   = scala.collection.mutable.Map[ByteBuffer,BitcaskLogEntry]()
+  val idx   = scala.collection.mutable.Map[ByteBuffer,BitcaskEntry]()
   val stats = scala.collection.mutable.Map[Long, LogStats]()
   // TODO: store this information on disk so we dont have to
   // iterate through all logfiles.
   log.iterate((id, is) => {
     var offset = 0
     def f: Unit = {
-      try_read(BitcaskData.HEADER_SIZE, is) match {
+      try_read(Bitcask.HEADER_SIZE, is) match {
         case ReadEof() =>
         case ReadOk(b) =>
-          val hdr = BitcaskData.unpack_header(ByteBuffer.wrap(b))
+          val hdr = Bitcask.unpack_header(ByteBuffer.wrap(b))
           try_read(hdr.keysize+hdr.valsize, is) match {
             case ReadOk(kv) =>
-              val body = BitcaskData.unpack_body(ByteBuffer.wrap(kv), hdr)
+              val body = Bitcask.unpack_body(ByteBuffer.wrap(kv), hdr)
               val be = BitcaskLogEntry(id         = id,
-                                       total_size = hdr.keysize+hdr.valsize+BitcaskData.HEADER_SIZE,
+                                       total_size = hdr.keysize+hdr.valsize+Bitcask.HEADER_SIZE,
                                        offset     = offset)
               debug("k = " + new String(body.key))
               debug("v = " + new String(body.value))
-              put(body.key, be)
-              offset+=BitcaskData.HEADER_SIZE+hdr.keysize+hdr.valsize
+              put(body.key, BitcaskEntry(pos=be, tombstone=Bitcask.is_tombstone(body.value)))
+              offset+=Bitcask.HEADER_SIZE+hdr.keysize+hdr.valsize
             case ReadEof() =>
               warn("unexpected eof while iterating %d".format(id))
             case ReadShort() =>
@@ -294,19 +307,20 @@ class BitcaskIdx(dir: File, log: BitcaskLog) extends Logging {
     else              return ReadOk(buf)
   }
 
-  def get(k: Array[Byte]) = {
+  def get(k: Array[Byte]) : Option[BitcaskEntry] = {
     idx.get(ByteBuffer.wrap(k))
   }
 
-  def put(k: Array[Byte], v: BitcaskLogEntry) = {
+  def put(k: Array[Byte], v: BitcaskEntry) = {
     idx.put(ByteBuffer.wrap(k), v) match {
       case Some(old) =>
         // if(tombstone(v) && tombstone(old)) dec(v) else
         inc(v)
         dec(old)
-      case None =>
-        // if(tombstone) dec(v) else
-        inc(v)
+      case None if v.tombstone =>
+        // race condition, 
+        dec(v)
+      case None => inc(v)
     }
   }
 
@@ -321,17 +335,17 @@ class BitcaskIdx(dir: File, log: BitcaskLog) extends Logging {
     */
   )
 
-  def inc(be: BitcaskLogEntry) = {
-    stats.get(be.id) match {
-      case Some(s) => stats.put(be.id, s.copy(live_keys = s.live_keys+1))
-      case None    => stats.put(be.id, LogStats(live_keys=1))
+  def inc(be: BitcaskEntry) = {
+    stats.get(be.pos.id) match {
+      case Some(s) => stats.put(be.pos.id, s.copy(live_keys = s.live_keys+1))
+      case None    => stats.put(be.pos.id, LogStats(live_keys=1))
     }
   }
 
-  def dec(be: BitcaskLogEntry) = {
-    stats.get(be.id) match {
-      case Some(s) => stats.put(be.id, s.copy(live_keys = Math.max(s.live_keys-1, 0)))
-      case None    => stats.put(be.id, LogStats(live_keys=0))
+  def dec(be: BitcaskEntry) = {
+    stats.get(be.pos.id) match {
+      case Some(s) => stats.put(be.pos.id, s.copy(live_keys = Math.max(s.live_keys-1, 0)))
+      case None    => stats.put(be.pos.id, LogStats(live_keys=0))
     }
   }
 }
