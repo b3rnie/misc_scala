@@ -27,6 +27,20 @@ class BitcaskTest extends FlatSpec {
     assert(bc2.get("bar".getBytes())     === None)
   }
 
+  "Bitcask" should "compact" in {
+    var dir = init_dir
+    var bc  = new Bitcask(dir)
+    bc.put("foo".getBytes(), "123".getBytes())
+    bc.put("bar".getBytes(), "456".getBytes())
+    bc.put("baz".getBytes(), "789".getBytes())
+    bc.delete("foo".getBytes())
+    bc.put("bar".getBytes(), "012".getBytes())
+    bc.compact()
+    assert(bc.get("foo".getBytes())     === None)
+    assert(bc.get("bar".getBytes()).get === "012".getBytes())
+    assert(bc.get("baz".getBytes()).get === "789".getBytes())
+  }
+
   def init_dir = {
     var dir = new File("bitcask_test")
     if(dir.exists()) {
