@@ -69,6 +69,8 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
   }
 
   def put(k: Array[Byte], v: Array[Byte]) = {
+    require(k.size <= 0xFFFF, "key is too big")
+    require(v.size <= 0xFFFFFFFFL, "value is too big")
     val ts = Bitcask.timestamp
     val b  = Bitcask.pack(k,v,ts)
     log.synchronized {
@@ -103,6 +105,7 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
   }
 
   def compact() = {
+    log.synchronized { log.switch_log() }
     // This could be done more clever by using our statistics
     // either way, rebuild everything for now
     val files = log.archive
@@ -110,23 +113,42 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
       Bitcask.iterate(log, id, (k,v,e) => {
         // drop: expired, superseeded, tombstones
         // save: current
-        idx.get(k) match {
-          case Some(BitcaskEntry(pos,tombstone,timestamp))
-            if tombstone =>
-          // previous (shadowed) value is dropped
-          case Some(BitcaskEntry(pos,tombstone,timestamp))
-            if is_expired(timestamp) =>
-          // expired
-          case Some(BitcaskEntry(pos,tombstone,timestamp))
-            if pos != e.pos =>
-          // shadowed by later
-          case Some(BitcaskEntry(pos,tombstone,timestamp)) =>
-            // save
+        val(action,oldpos) =
+          idx.get(k) match {
+            case Some(BitcaskEntry(pos,tombstone,timestamp))
+              if tombstone =>
+              // previous (shadowed) value is already dropped
+              ('drop, pos)
+            case Some(BitcaskEntry(pos,tombstone,timestamp))
+              if is_expired(timestamp) =>
+              // expired
+              ('drop, pos)
+            case Some(BitcaskEntry(pos,tombstone,timestamp))
+              if pos != e.pos =>
+              // shadowed by later
+              ('drop, pos)
+            case Some(BitcaskEntry(pos,tombstone,timestamp)) =>
+              // save
+              ('save, pos)
+            case None =>
+              // should not happen
+              throw new RuntimeException("oh no!")
+          }
+        log.synchronized {
+          idx.get(k) match {
+            case Some(BitcaskEntry(pos,tombstone,timestamp))
+              if pos == oldpos && action == 'save =>
+              val b  = Bitcask.pack(k,v,timestamp)
+              val newpos = log.append(b)
+              idx.put(k, BitcaskEntry(pos       = newpos,
+                                      tombstone = tombstone,
+                                      timestamp = timestamp))
+            case _ =>
+              // something happened
+          }
         }
-        // something might have been appended to the log,
-        // dont blindly append!
       })
-      // log.delete(id)
+      log.delete(id)
     })
   }
 
@@ -316,6 +338,7 @@ class BitcaskLog(dir: File) extends Logging {
 
   def switch_log() = {
     active.close()
+    archive = archive :+ next_id-1
     active = open_active()
   }
 
@@ -329,6 +352,7 @@ class BitcaskLog(dir: File) extends Logging {
   }
 
   def delete(id: Long) = {
+    archive = archive.filter(_ != id)
     new File(dir, filename(id)).delete()
   }
 
