@@ -11,33 +11,6 @@ import scala.collection.concurrent.TrieMap
 import scala.util.matching.Regex
 import com.typesafe.config.ConfigFactory
 
-case class BitcaskEntry (
-  pos:       BitcaskLogEntry,
-  tombstone: Boolean,
-  timestamp: Long
-)
-
-case class BitcaskLogEntry (
-  id:         Long,
-  offset:     Int,
-  total_size: Int
-)
-
-case class BitcaskHeader (
-  crc32:     Long,
-  timestamp: Long,
-  keysize:   Int,
-  valsize:   Int
-)
-
-case class BitcaskBody (
-  key:   Array[Byte],
-  value: Array[Byte]
-)
-
-class BitcaskException(s: String) extends RuntimeException(s) {}
-class BitcaskLogException(s: String) extends RuntimeException(s) {}
-
 class Bitcask(dir: File, timeout: Int = 0) extends Logging {
   val config = ConfigFactory.load().getConfig("bitcask")
   val max_size = config.getLong("max_size")
@@ -47,23 +20,13 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
   var compactor = new Thread(new Compactor())
   compactor.start()
 
-  class Compactor extends Runnable {
-    override def run() {
-      while (compaction_interval > 0 &&
-             !Thread.currentThread().isInterrupted()) {
-        Thread.sleep(compaction_interval * 1000)
-        compact()
-      }
-    }
-  }
-
   def get(k: Array[Byte]) : Option[Array[Byte]] = {
     idx.get(k) match {
-      case Some(BitcaskEntry(pos,tombstone,timestamp))
+      case Some(Bitcask.Entry(pos,tombstone,timestamp))
         if tombstone => None
-      case Some(e @ BitcaskEntry(pos,tombstone,timestamp))
-        if is_expired(timestamp) => None
-      case Some(BitcaskEntry(pos,tombstone,timestamp)) =>
+      case Some(Bitcask.Entry(pos,tombstone,timestamp))
+        if Bitcask.is_expired(timeout, timestamp) => None
+      case Some(Bitcask.Entry(pos,tombstone,timestamp)) =>
         // read can fail here if compaction just deleted
         // the 'old' file
         var buf = log.read(pos)
@@ -81,26 +44,26 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
     val b  = Bitcask.pack(k,v,ts)
     log.synchronized {
       val pos = log.append(b)
-      idx.put(k, BitcaskEntry(pos       = pos,
-                              tombstone = false,
-                              timestamp = ts))
+      idx.put(k, Bitcask.Entry(pos       = pos,
+                               tombstone = false,
+                               timestamp = ts))
     }
   }
 
   def delete(k: Array[Byte]) : Boolean = {
     idx.get(k) match {
-      case Some(BitcaskEntry(pos,tombstone,timestamp))
+      case Some(Bitcask.Entry(pos,tombstone,timestamp))
         if tombstone => false
-      case Some(e @ BitcaskEntry(pos,tombstone,timestamp))
-        if is_expired(timestamp) => false
-      case Some(BitcaskEntry(pos,tombstone,timestamp)) =>
+      case Some(Bitcask.Entry(pos,tombstone,timestamp))
+        if Bitcask.is_expired(timeout, timestamp) => false
+      case Some(Bitcask.Entry(pos,tombstone,timestamp)) =>
         val ts = Bitcask.timestamp
         val b  = Bitcask.pack(k,Bitcask.TOMBSTONE.getBytes,ts)
         log.synchronized {
           val pos = log.append(b)
-          idx.put(k, BitcaskEntry(pos       = pos,
-                                  tombstone = true,
-                                  timestamp = timestamp))
+          idx.put(k, Bitcask.Entry(pos       = pos,
+                                   tombstone = true,
+                                   timestamp = timestamp))
         }
         true
       case None => false
@@ -118,40 +81,40 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
         println("compact: " + new String(k))
         val(action,oldpos) =
           idx.get(k) match {
-            case Some(BitcaskEntry(pos,tombstone,timestamp))
+            case Some(Bitcask.Entry(pos,tombstone,timestamp))
               if tombstone =>
               // previous (shadowed) value is already dropped
               // if that exist
               ('drop, pos)
-            case Some(BitcaskEntry(pos,tombstone,timestamp))
-              if is_expired(timestamp) =>
+            case Some(Bitcask.Entry(pos,tombstone,timestamp))
+              if Bitcask.is_expired(timeout, timestamp) =>
               // expired
               ('drop, pos)
-            case Some(BitcaskEntry(pos,tombstone,timestamp))
+            case Some(Bitcask.Entry(pos,tombstone,timestamp))
               if pos != e.pos =>
               // shadowed by later
               ('drop, pos)
-            case Some(BitcaskEntry(pos,tombstone,timestamp)) =>
+            case Some(Bitcask.Entry(pos,tombstone,timestamp)) =>
               // save
               ('save, pos)
             case None =>
               // should not happen
-              throw new BitcaskException("impossible state")
+              throw new Bitcask.BitcaskException("impossible state")
           }
         log.synchronized {
           idx.get(k) match {
-            case Some(BitcaskEntry(pos,tombstone,timestamp))
+            case Some(Bitcask.Entry(pos,tombstone,timestamp))
               if pos == e.pos && action == 'drop =>
               debug("deleting %s from idx".format(new String(k)))
               idx.delete(k)
-            case Some(BitcaskEntry(pos,tombstone,timestamp))
+            case Some(Bitcask.Entry(pos,tombstone,timestamp))
               if pos == e.pos && action == 'save =>
               debug("updating %s in idx".format(new String(k)))
               val b  = Bitcask.pack(k,v,timestamp)
               val newpos = log.append(b)
-              idx.put(k, BitcaskEntry(pos       = newpos,
-                                      tombstone = tombstone,
-                                      timestamp = timestamp))
+              idx.put(k, Bitcask.Entry(pos       = newpos,
+                                       tombstone = tombstone,
+                                       timestamp = timestamp))
             case Some(_) =>
               // idx points to later value
             case None =>
@@ -173,8 +136,18 @@ class Bitcask(dir: File, timeout: Int = 0) extends Logging {
     log.stop
   }
 
-  def is_expired(timestamp: Long) = {
-    timeout != 0 && timestamp+timeout >= Bitcask.timestamp
+  class Compactor extends Runnable {
+    override def run() {
+      while (compaction_interval > 0 &&
+             !Thread.currentThread().isInterrupted()) {
+        try {
+          Thread.sleep(compaction_interval * 1000)
+          compact()
+        } catch {
+          case e: java.lang.InterruptedException =>
+        }
+      }
+    }
   }
 }
 
@@ -186,6 +159,35 @@ object Bitcask extends Logging {
   // valuesize - 4 bytes
   final val HEADER_SIZE = 14
 
+  case class Entry (
+    pos:       Bitcask.LogEntry,
+    tombstone: Boolean,
+    timestamp: Long
+  )
+
+  case class LogEntry (
+    id:         Long,
+    offset:     Int,
+    total_size: Int
+  )
+
+  case class Header (
+    crc32:     Long,
+    timestamp: Long,
+    keysize:   Int,
+    valsize:   Int
+  )
+
+  case class Body (
+    key:   Array[Byte],
+    value: Array[Byte]
+  )
+
+  class BitcaskException(s: String) extends RuntimeException(s) {}
+  class BitcaskLogException(s: String) extends RuntimeException(s) {}
+  class BitcaskCRC32Exception(s: String) extends RuntimeException(s) {
+    def this() = this(null)
+  }
   def pack(k: Array[Byte], v: Array[Byte], ts: Long) : ByteBuffer = {
     // FIXME: max key/val size
     val size = HEADER_SIZE + k.size + v.size
@@ -207,7 +209,7 @@ object Bitcask extends Logging {
     buffer
   }
 
-  def unpack(b: ByteBuffer) : Tuple2[BitcaskHeader,BitcaskBody] = {
+  def unpack(b: ByteBuffer) : Tuple2[Bitcask.Header,Bitcask.Body] = {
     // check key
     // check boundaries
     var hdr = unpack_header(b)
@@ -215,12 +217,12 @@ object Bitcask extends Logging {
     var a = b.array()
     crc32.update(a, 4, a.size-4)
     if(crc32.getValue() != hdr.crc32)
-      throw new CRC32Exception
+      throw new BitcaskCRC32Exception
     var body = unpack_body(b, hdr)
     (hdr,body)
   }
 
-  def unpack_header(b: ByteBuffer) : BitcaskHeader = {
+  def unpack_header(b: ByteBuffer) : Bitcask.Header = {
     var crc32val = b.getChar().toLong
     crc32val     = (crc32val << 16) | b.getChar().toLong
     var tstamp   = b.getChar().toLong
@@ -228,23 +230,23 @@ object Bitcask extends Logging {
     var ksize    = b.getChar().toInt
     var vsize    = b.getChar().toInt
     vsize        = (vsize << 16) | b.getChar().toInt
-    BitcaskHeader(crc32     = crc32val,
-                  timestamp = tstamp,
-                  keysize   = ksize,
-                  valsize   = vsize)
+    Bitcask.Header(crc32     = crc32val,
+                   timestamp = tstamp,
+                   keysize   = ksize,
+                   valsize   = vsize)
   }
 
-  def unpack_body(b: ByteBuffer, hdr: BitcaskHeader) : BitcaskBody = {
+  def unpack_body(b: ByteBuffer, hdr: Bitcask.Header) : Bitcask.Body = {
     var k = new Array[Byte](hdr.keysize)
     var v = new Array[Byte](hdr.valsize)
     b.get(k)
     b.get(v)
-    BitcaskBody(key=k, value=v)
+    Bitcask.Body(key=k, value=v)
   }
 
   def iterate(log: BitcaskLog,
               id:  Long,
-              f:   (Array[Byte], Array[Byte], BitcaskEntry) => Any) : Unit = {
+              f:   (Array[Byte], Array[Byte], Bitcask.Entry) => Any) : Unit = {
     log.iterate(id, is => {
       var offset = 0
       def loop: Unit = {
@@ -255,14 +257,14 @@ object Bitcask extends Logging {
             try_read(hdr.keysize+hdr.valsize, is) match {
               case ReadOk(kv) =>
                 val body = Bitcask.unpack_body(ByteBuffer.wrap(kv), hdr)
-                val pos  = BitcaskLogEntry(id         = id,
-                                           total_size = hdr.keysize+hdr.valsize+Bitcask.HEADER_SIZE,
-                                           offset     = offset)
+                val pos  = Bitcask.LogEntry(id         = id,
+                                            total_size = hdr.keysize+hdr.valsize+Bitcask.HEADER_SIZE,
+                                            offset     = offset)
                 debug("k = " + new String(body.key))
                 debug("v = " + new String(body.value))
-                val e = BitcaskEntry(pos       = pos,
-                                     tombstone = Bitcask.is_tombstone(body.value),
-                                     timestamp = hdr.timestamp)
+                val e = Bitcask.Entry(pos       = pos,
+                                      tombstone = Bitcask.is_tombstone(body.value),
+                                      timestamp = hdr.timestamp)
                 f(body.key,body.value,e)
                 offset+=Bitcask.HEADER_SIZE+hdr.keysize+hdr.valsize
                 loop
@@ -306,11 +308,11 @@ object Bitcask extends Logging {
     ByteBuffer.wrap(value) == ByteBuffer.wrap(TOMBSTONE.getBytes)
   }
 
-  def timestamp = (System.currentTimeMillis() / 1000).toLong
-
-  class CRC32Exception(s: String) extends RuntimeException(s) {
-    def this() = this(null)
+  def is_expired(timeout: Int, timestamp: Long) = {
+    timeout != 0 && timestamp+timeout >= Bitcask.timestamp
   }
+
+  def timestamp = (System.currentTimeMillis() / 1000).toLong
 }
 
 // Simple append only log
@@ -330,7 +332,7 @@ class BitcaskLog(dir: File, max_size: Long) extends Logging {
     try { f(is) } finally { is.close }
   }
 
-  def read(e: BitcaskLogEntry) : ByteBuffer = {
+  def read(e: Bitcask.LogEntry) : ByteBuffer = {
     // FIXME: pool
     val raf = new RandomAccessFile(new File(dir, filename(e.id)), "r")
     try {
@@ -338,7 +340,7 @@ class BitcaskLog(dir: File, max_size: Long) extends Logging {
       var chan = raf.getChannel()
       chan.position(e.offset)
       if(raf.getChannel().read(buff)!=e.total_size)
-        throw new BitcaskLogException("unable to read entry")
+        throw new Bitcask.BitcaskLogException("unable to read entry")
       buff.flip()
       buff
     } finally {
@@ -352,16 +354,16 @@ class BitcaskLog(dir: File, max_size: Long) extends Logging {
     active = open_active()
   }
 
-  def append(e: ByteBuffer) : BitcaskLogEntry = {
+  def append(e: ByteBuffer) : Bitcask.LogEntry = {
     var pos = active.getFilePointer().toInt
     if(pos >= max_size) {
       switch_log()
       pos = 0
     }
     active.getChannel.write(e)
-    BitcaskLogEntry(id         = next_id -1,
-                    offset     = pos,
-                    total_size = (active.getFilePointer()-pos).toInt)
+    Bitcask.LogEntry(id         = next_id -1,
+                     offset     = pos,
+                     total_size = (active.getFilePointer()-pos).toInt)
   }
 
   def delete(id: Long) = {
@@ -397,7 +399,7 @@ class BitcaskLog(dir: File, max_size: Long) extends Logging {
 }
 
 class BitcaskIdx(dir: File, log: BitcaskLog) extends Logging {
-  val idx = new TrieMap[ByteBuffer,BitcaskEntry]
+  val idx = new TrieMap[ByteBuffer,Bitcask.Entry]
 
   // FIXME: dont traverse everything on startup
   log.archive.foreach(id => {
@@ -405,11 +407,11 @@ class BitcaskIdx(dir: File, log: BitcaskLog) extends Logging {
     Bitcask.iterate(log, id, (k,v,e) => put(k,e))
   })
   // API ---------------------------------------------------------------
-  def get(k: Array[Byte]) : Option[BitcaskEntry] = {
+  def get(k: Array[Byte]) : Option[Bitcask.Entry] = {
     idx.get(ByteBuffer.wrap(k))
   }
 
-  def put(k: Array[Byte], e: BitcaskEntry) = {
+  def put(k: Array[Byte], e: Bitcask.Entry) = {
     idx.put(ByteBuffer.wrap(k), e) match {
       case Some(old) =>
       case None =>
