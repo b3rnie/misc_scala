@@ -317,13 +317,18 @@ object Bitcask extends Logging {
 
 // Simple append only log
 class BitcaskLog(dir: File, max_size: Long) extends Logging {
-  var archive = archive_files()
-  var next_id = if(archive.size!=0) archive.last+1 else 1
-  var active  = open_active()
+  var archive    = archive_files()
+  var next_id    = if(archive.size!=0) archive.last+1 else 1
+  var active     = open_active()
   var active_pos = 0
+  var pool       = new TrieMap[Long,Pool]
 
   info("log starting with dir: %s".format(dir))
-  archive.foreach(f => info("archive file: %s".format(f)))
+  archive.foreach(f => {
+    info("archive file: %s".format(f))
+    pool.put(f, new Pool(4, f))
+  })
+  pool.put(next_id-1, new Pool(4, next_id-1))
 
   // API ---------------------------------------------------------------
   def iterate(id: Long, f: BufferedInputStream => Any) : Unit = {
@@ -333,18 +338,15 @@ class BitcaskLog(dir: File, max_size: Long) extends Logging {
   }
 
   def read(e: Bitcask.LogEntry) : ByteBuffer = {
-    // FIXME: pool
-    val raf = new RandomAccessFile(new File(dir, filename(e.id)), "r")
-    try {
-      var buff = ByteBuffer.allocate(e.total_size)
-      var chan = raf.getChannel()
-      chan.position(e.offset)
-      if(raf.getChannel().read(buff)!=e.total_size)
-        throw new Bitcask.BitcaskLogException("unable to read entry")
-      buff.flip()
-      buff
-    } finally {
-      raf.close()
+    pool.get(e.id) match {
+      case Some(p) => p.exec(f => {
+        var buff = ByteBuffer.allocate(e.total_size)
+        f.chan.position(e.offset)
+        if(f.chan.read(buff)!=e.total_size)
+          throw new Bitcask.BitcaskLogException("unable to read entry")
+        buff.flip()
+        buff
+      })
     }
   }
 
@@ -352,6 +354,7 @@ class BitcaskLog(dir: File, max_size: Long) extends Logging {
     active.close()
     archive = archive :+ next_id-1
     active = open_active()
+    pool.put(next_id-1, new Pool(4, next_id-1))
   }
 
   def append(e: ByteBuffer) : Bitcask.LogEntry = {
@@ -368,6 +371,10 @@ class BitcaskLog(dir: File, max_size: Long) extends Logging {
 
   def delete(id: Long) = {
     archive = archive.filter(_ != id)
+    //pool.get(id).foreach(p => {
+    //  p.stop
+    //  pool.remove(id)
+    //})
     new File(dir, filename(id)).delete()
   }
 
@@ -396,6 +403,46 @@ class BitcaskLog(dir: File, max_size: Long) extends Logging {
   private def filename(id: Long) = {
     "bitcask_%019d.data".format(id)
   }
+
+  class Pool(n: Int, id: Long) {
+    val q = new java.util.concurrent.ArrayBlockingQueue[PoolResource](n)
+    var i = 0
+    for(i <- 1 to n) {
+      q.add(new PoolResource(id))
+    }
+    def exec(f: (PoolResource) => ByteBuffer) = {
+      q.poll match {
+        case r: PoolResource =>
+          try { f(r) }
+          finally {
+            q.add(r)
+          }
+        case null =>
+          var r = new PoolResource(id)
+          try { f(r) }
+          finally {
+            r.close()
+          }
+      }
+    }
+
+    def stop() = {
+      for(i <- 1 to n) {
+        var r = q.take()
+        r.close()
+      }
+    }
+  }
+
+  class PoolResource(id: Long) {
+    val raf  = new RandomAccessFile(new File(dir, filename(id)), "r")
+    val chan = raf.getChannel()
+    def apply = chan
+    def close() = {
+      chan.close()
+      raf.close()
+    }
+  }
 }
 
 class BitcaskIdx(dir: File, log: BitcaskLog) extends Logging {
@@ -422,3 +469,4 @@ class BitcaskIdx(dir: File, log: BitcaskLog) extends Logging {
     idx.remove(ByteBuffer.wrap(k))
   }
 }
+
