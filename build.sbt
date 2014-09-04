@@ -2,7 +2,7 @@ name := "misc"
 
 version := "1.0"
 
-scalacOptions ++= Seq("-unchecked", "-deprecation")
+scalacOptions ++= Seq("-unchecked", "-deprecation", "-feature")
 
 libraryDependencies += "org.scalatest" % "scalatest_2.10" % "2.0" % "test"
 
@@ -13,3 +13,6 @@ resolvers += "Typesafe Repository" at "http://repo.typesafe.com/typesafe/release
 libraryDependencies += "ch.qos.logback" % "logback-classic" % "1.1.2"
 
 libraryDependencies += "com.typesafe" % "config" % "1.2.1"
+
+libraryDependencies +=
+  "com.typesafe.akka" %% "akka-actor" % "2.3.5"
