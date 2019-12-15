@@ -29,7 +29,8 @@ class BinHeapTest extends FlatSpec {
     val l2 = l1.map(e => Tuple2(e,e))
     val heap = new MinBinHeap[Int,Int](l2.iterator)
     while(heap.size() != 0) {
-      println("head = " + heap.head())
+      //println("head = " + heap.peek())
+      heap.head()
     }
   }
 }

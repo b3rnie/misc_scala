@@ -14,5 +14,6 @@ libraryDependencies += "ch.qos.logback" % "logback-classic" % "1.1.2"
 
 libraryDependencies += "com.typesafe" % "config" % "1.2.1"
 
-libraryDependencies +=
-  "com.typesafe.akka" %% "akka-actor" % "2.3.5"
+libraryDependencies += "com.typesafe.akka" %% "akka-actor" % "2.3.5"
+
+libraryDependencies += "com.typesafe.slick" %% "slick" % "2.1.0"
