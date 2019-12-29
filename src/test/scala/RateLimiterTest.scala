@@ -11,9 +11,9 @@ class RateLimiterTest extends FlatSpec {
     val f3 = r.execute(() => { 3 })
 
     import ExecutionContext.Implicits.global
-    f1.onSuccess { case msg => println("future1 = " + msg)}
-    f2.onSuccess { case msg => println("future2 = " + msg)}
-    f3.onSuccess { case msg => println("future3 = " + msg)}
+    f1.onComplete { case msg => println("future1 = " + msg)}
+    f2.onComplete { case msg => println("future2 = " + msg)}
+    f3.onComplete { case msg => println("future3 = " + msg)}
 
     Thread.sleep(5000)
     r.stop()

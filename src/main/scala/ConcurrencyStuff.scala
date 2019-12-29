@@ -10,11 +10,8 @@ object ConcurrencyStuff {
       "some result"
     }
     println(f)
-    f.onSuccess {
-      case r => println(r)
-    }
-    f.onFailure {
-      case e => println(e)
+    f.onComplete { x =>
+      println(x)
     }
 
     val f2 = Future {

@@ -6,7 +6,7 @@ import akka.util.Timeout
 import scala.concurrent._
 import scala.concurrent.duration._
 import scala.util.{Success,Failure}
-import scala.collection.mutable.{Queue,MutableList}
+import scala.collection.mutable.{Queue,ListBuffer}
 
 class RateLimiter(n: Int, s: Int) {
   val system = ActorSystem("RateLimiter")
@@ -29,7 +29,7 @@ class RateLimiter(n: Int, s: Int) {
   class Master extends Actor {
     val queue         = Queue[(() => Any, ActorRef)]()
     var scheduledTick = false
-    var started       = MutableList[Long]()
+    var started       = ListBuffer[Long]()
 
     import ExecutionContext.Implicits.global
     def receive = {

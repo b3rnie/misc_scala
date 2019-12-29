@@ -1,6 +1,5 @@
 package misc
 
-import scala.slick.driver.H2Driver.simple._
 import java.sql.{DriverManager}
 
 class DB(name: String, tab: String) {
